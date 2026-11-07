@@ -1,0 +1,57 @@
+# switchctl 配置样例 —— 复制为 configs/switchctl.yaml 后按需修改。
+# 目标平台：Cisco Nexus 9000（NX-API）/ 锐捷 RG-S6580（NETCONF）。
+# 注意：南向下发后端尚未实现；配置了设备时控制器启动会因初始化失败而退出。
+# 凭据只写“环境变量名/文件路径”，不写明文；启动时解析，缺失即报错。
+
+server:
+  listen: "127.0.0.1:8080"        # 生产环境绑定内网管理地址，不要 0.0.0.0
+  read_timeout: 30s
+  write_timeout: 60s
+  shutdown_grace: 30s             # SIGTERM 后等待在途操作的时长
+  max_config_bytes: 1048576       # 请求体上限 1 MiB
+
+storage:
+  data_dir: ./data
+  # sqlite_path: ./data/switchctl.db      # 默认 data_dir/switchctl.db
+
+execution:
+  operation_timeout: 10m          # 单个操作（应用/对账）的总时限
+
+  max_queue_depth: 128            # 每设备待执行操作上限；满了直接 429/503，绝不阻塞请求
+
+marking:
+  value: managed-by-switchctl        # 写进设备的“归控制器管理”标记值
+                                     # 具体写在哪个字段（description / 名称后缀…）由平台后端决定
+
+logging:
+  level: info                     # debug | info | warn | error
+  format: text                    # text | json
+  # file: /var/log/switchctl/switchctl.log
+  redact_patterns:
+    - '(?i)^\s*(enable|password|secret|key-string)\b.*'
+    - '(?i)^\s*username\s+\S+\s+(password|secret)\b.*'
+    - '(?i)^\s*snmp-server\s+community\b.*'
+
+devices:
+  # Cisco Nexus 9000（standalone）：南向走 NX-API（HTTPS），端口默认 443
+  - name: nx-core-1
+    host: 10.0.0.11
+    port: 443
+    dialect: cisco_nxos
+    # bgp_asn: "65000"             # 设备尚未运行 BGP 时，创建 BGP 邻居需要它（已运行则自动解析）
+    credentials:
+      username_env: NX1_USER
+      password_env: NX1_PASSWORD
+      # 或者私钥认证（优先于密码）：
+      # private_key_file: /etc/switchctl/keys/nx-core-1
+      # private_key_passphrase_env: NX1_KEY_PASSPHRASE
+
+  # 锐捷 RG-S6580（RGOS 12.5）：南向走 NETCONF（SSH），端口默认 830
+  # 设备侧前置：netconf enable / netconf capability candidate / netconf max-sessions 4
+  - name: rg-leaf-1
+    host: 10.0.0.21
+    port: 830
+    dialect: ruijie_rgos
+    credentials:
+      username_env: RG1_USER
+      password_env: RG1_PASSWORD
