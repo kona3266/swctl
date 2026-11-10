@@ -91,9 +91,10 @@ func (s *Service) applyChange(
 		return nil, err
 	}
 
-	// 留存"抽象变更"（模型 delta）：diff(新模型, 旧模型）。
+	// 留存"抽象变更"（模型 delta）：diff(新模型, 旧模型)。
 	// 具体传输格式由 southbound 后端在执行时渲染（接口、命令、XML/JSON 均由后端决定）。
-	delta := model.Compute(working, oldModel)
+	// 落库前脱敏：BGP 密码等只写字段不进入操作记录。
+	delta := model.Compute(working, oldModel).Sanitized()
 	changesJSON, _ := json.Marshal(changes)
 	deltaJSON, _ := json.Marshal(delta)
 

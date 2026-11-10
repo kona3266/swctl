@@ -62,6 +62,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/switches/{name}/vlan-interfaces/{vlan}", s.handlePutSVI)
 	s.mux.HandleFunc("DELETE /api/v1/switches/{name}/vlan-interfaces/{vlan}", s.handleDeleteSVI)
 
+	// 业务：物理口（二层/三层模式）与 VLAN 子接口
+	s.mux.HandleFunc("GET /api/v1/switches/{name}/ports", s.handleListPorts)
+	s.mux.HandleFunc("PUT /api/v1/switches/{name}/ports/{port}", s.handlePutPort)
+	s.mux.HandleFunc("GET /api/v1/switches/{name}/ports/{port}/sub-interfaces", s.handleListSubInterfaces)
+	s.mux.HandleFunc("PUT /api/v1/switches/{name}/ports/{port}/sub-interfaces/{vlan}", s.handlePutSubInterface)
+	s.mux.HandleFunc("DELETE /api/v1/switches/{name}/ports/{port}/sub-interfaces/{vlan}", s.handleDeleteSubInterface)
+	s.mux.HandleFunc("PUT /api/v1/switches/{name}/ports/{port}/sub-interfaces/{vlan}/vrf", s.handleJoinSubInterfaceVRF)
+	s.mux.HandleFunc("DELETE /api/v1/switches/{name}/ports/{port}/sub-interfaces/{vlan}/vrf", s.handleLeaveSubInterfaceVRF)
+
 	// 业务：SVI 与 VRF 绑定
 	s.mux.HandleFunc("PUT /api/v1/switches/{name}/vlan-interfaces/{vlan}/vrf", s.handleJoinSVIVRF)
 	s.mux.HandleFunc("DELETE /api/v1/switches/{name}/vlan-interfaces/{vlan}/vrf", s.handleLeaveSVIVRF)

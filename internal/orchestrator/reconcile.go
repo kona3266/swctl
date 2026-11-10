@@ -22,36 +22,52 @@ type reconcileSummary struct {
 	SVIUpdated int `json:"svi_updated,omitempty"`
 	SVIDeleted int `json:"svi_deleted,omitempty"`
 
+	PortAdded   int `json:"port_added,omitempty"`
+	PortUpdated int `json:"port_updated,omitempty"`
+
+	SubInterfaceAdded   int `json:"sub_interface_added,omitempty"`
+	SubInterfaceUpdated int `json:"sub_interface_updated,omitempty"`
+	SubInterfaceDeleted int `json:"sub_interface_deleted,omitempty"`
+
 	BGPAdded   int `json:"bgp_peer_added,omitempty"`
 	BGPUpdated int `json:"bgp_peer_updated,omitempty"`
 	BGPDeleted int `json:"bgp_peer_deleted,omitempty"`
 
-	UnmanagedVRFs     []string `json:"unmanaged_vrfs,omitempty"`
-	UnmanagedVLANs    []int    `json:"unmanaged_vlans,omitempty"`
-	UnmanagedSVIs     []int    `json:"unmanaged_svis,omitempty"`
-	UnmanagedBGPPeers []string `json:"unmanaged_bgp_peers,omitempty"`
-	Remaining         int      `json:"remaining,omitempty"`
-	TotalChanges      int      `json:"total_changes,omitempty"`
+	UnmanagedVRFs          []string `json:"unmanaged_vrfs,omitempty"`
+	UnmanagedVLANs         []int    `json:"unmanaged_vlans,omitempty"`
+	UnmanagedSVIs          []int    `json:"unmanaged_svis,omitempty"`
+	UnmanagedPorts         []string `json:"unmanaged_ports,omitempty"`
+	UnmanagedSubInterfaces []string `json:"unmanaged_sub_interfaces,omitempty"`
+	UnmanagedBGPPeers      []string `json:"unmanaged_bgp_peers,omitempty"`
+	Remaining              int      `json:"remaining,omitempty"`
+	TotalChanges           int      `json:"total_changes,omitempty"`
 }
 
 func summarize(d *model.Diff) *reconcileSummary {
 	return &reconcileSummary{
-		VRFAdded:          len(d.VRFsAdd),
-		VRFUpdated:        len(d.VRFsUpdate),
-		VRFDeleted:        len(d.VRFsDelete),
-		VLANAdded:         len(d.VLANsAdd),
-		VLANUpdated:       len(d.VLANsUpdate),
-		VLANDeleted:       len(d.VLANsDelete),
-		SVIAdded:          len(d.SVIsAdd),
-		SVIUpdated:        len(d.SVIsUpdate),
-		SVIDeleted:        len(d.SVIsDelete),
-		BGPAdded:          len(d.BGPPeersAdd),
-		BGPUpdated:        len(d.BGPPeersUpdate),
-		BGPDeleted:        len(d.BGPPeersDelete),
-		UnmanagedVRFs:     d.UnmanagedVRFs,
-		UnmanagedVLANs:    d.UnmanagedVLANs,
-		UnmanagedSVIs:     d.UnmanagedSVIs,
-		UnmanagedBGPPeers: d.UnmanagedBGPPeers,
+		VRFAdded:               len(d.VRFsAdd),
+		VRFUpdated:             len(d.VRFsUpdate),
+		VRFDeleted:             len(d.VRFsDelete),
+		VLANAdded:              len(d.VLANsAdd),
+		VLANUpdated:            len(d.VLANsUpdate),
+		VLANDeleted:            len(d.VLANsDelete),
+		SVIAdded:               len(d.SVIsAdd),
+		SVIUpdated:             len(d.SVIsUpdate),
+		SVIDeleted:             len(d.SVIsDelete),
+		PortAdded:              len(d.PortsAdd),
+		PortUpdated:            len(d.PortsUpdate),
+		SubInterfaceAdded:      len(d.SubInterfacesAdd),
+		SubInterfaceUpdated:    len(d.SubInterfacesUpdate),
+		SubInterfaceDeleted:    len(d.SubInterfacesDelete),
+		BGPAdded:               len(d.BGPPeersAdd),
+		BGPUpdated:             len(d.BGPPeersUpdate),
+		BGPDeleted:             len(d.BGPPeersDelete),
+		UnmanagedVRFs:          d.UnmanagedVRFs,
+		UnmanagedVLANs:         d.UnmanagedVLANs,
+		UnmanagedSVIs:          d.UnmanagedSVIs,
+		UnmanagedPorts:         d.UnmanagedPorts,
+		UnmanagedSubInterfaces: d.UnmanagedSubInterfaces,
+		UnmanagedBGPPeers:      d.UnmanagedBGPPeers,
 	}
 }
 

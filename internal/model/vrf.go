@@ -65,6 +65,12 @@ func (c *DeviceConfig) DeleteVRF(name string) error {
 			return fmt.Errorf("VRF %s 仍配置有 BGP 邻居 %s：请先删除邻居", name, p.Neighbor)
 		}
 	}
+	for _, s := range c.SubInterfaces {
+		if s.VRF == name {
+			return fmt.Errorf("VRF %s 仍被子接口 %s 引用：请先将其移出该 VRF",
+				name, SubInterfaceKey(s.Port, s.VLAN))
+		}
+	}
 	delete(c.VRFs, name)
 	return nil
 }

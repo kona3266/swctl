@@ -2,7 +2,7 @@
 
 调用方用**业务语义**操作交换机（创建 VRF、删除 VLAN……），不需要接触任何 CLI。
 控制器维护一份**权威配置模型**（内存为主 + DB 持久化，版本化），业务变更直接提交到模型，
-再由后台把**期望态**收敛到设备上；周期性对账负责漂移修复。
+再由后台把**期望态**收敛到设备上；漂移修复在启动对账时进行。
 
 ```
 期望态（每交换机一份全量模型：VRF/VLAN/SVI/BGP，版本化）
@@ -79,8 +79,15 @@ netconf max-sessions 4            # 默认 1，需给运维/监控留口
 | DELETE | `/switches/{name}/vlan-interfaces/{vlan}` | 删除 SVI |
 | PUT | `/switches/{name}/vlan-interfaces/{vlan}/vrf` | **SVI 加入 VRF**，body `{"vrf":"CUSTOMER1"}` |
 | DELETE | `/switches/{name}/vlan-interfaces/{vlan}/vrf` | **SVI 离开 VRF**（幂等） |
+| GET | `/switches/{name}/ports` | 查询受管物理口（二层/三层模式） |
+| PUT | `/switches/{name}/ports/{port}` | 纳管物理口/设置模式，body `{"mode":"l3"}` 或 `{"mode":"l2"}`（见下） |
+| GET | `/switches/{name}/ports/{port}/sub-interfaces` | 查询该端口下的 VLAN 子接口 |
+| PUT | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}` | **创建/更新子接口**，body `{"ip":"10.0.0.1/24","vrf":"CUSTOMER1"}` |
+| DELETE | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}` | **删除子接口** |
+| PUT | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}/vrf` | **子接口加入 VRF**，body `{"vrf":"CUSTOMER1"}` |
+| DELETE | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}/vrf` | **子接口离开 VRF**（幂等） |
 | GET | `/switches/{name}/vrfs/{vrf}/bgp-neighbors` | 查询 VRF 内 BGP 邻居 |
-| PUT | `/switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` | **配置 BGP 邻居**，body `{"remote_as":"65001"}` |
+| PUT | `/switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` | **配置 BGP 邻居**，body 见下 |
 | DELETE | `/switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` | **删除 BGP 邻居** |
 | GET | `/operations/{id}` | 操作详情（含变更摘要、抽象差异 delta、失败原因） |
 | GET | `/operations?switch=&status=&kind=&limit=` | 操作列表 |
@@ -106,10 +113,67 @@ netconf max-sessions 4            # 默认 1，需给运维/监控留口
 | VLAN | `vlan N`（+ name） | VLAN 1 与 Cisco 保留 1002~1005 禁止操作 |
 | SVI | `interface VlanN` + IP（必填，CIDR） | **只能建在管理中的 VLAN 上**；VLAN 有 SVI 时禁止删 VLAN |
 | SVI↔VRF | 加入/移出 VRF | VRF 与 SVI 都须在管理中；绑定时禁止删 VRF |
+| 物理口 | 二层/三层模式（`switchport` / `no switchport`） | **有子接口时禁止切换模式** |
+| VLAN 子接口 | `interface <Port>.<tag>` + `encapsulation dot1q <tag>` + IP | 父口须已纳管**且为三层模式**；IP 必填；绑定 VRF 时禁止删 VRF |
 | BGP 邻居 | VRF 内 address-family + neighbor | VRF 须在管理中；配置邻居时禁止删 VRF |
 
 本地 BGP AS 号：设备已在跑 BGP 时自动解析；设备尚未运行 BGP 时须在设备清单声明
 `bgp_asn`，否则创建邻居返回 400。
+
+### BGP 邻居参数
+
+`PUT /switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` 的 body（除 `remote_as` 外均可选）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `remote_as` | string | 对端 AS 号（1~4294967295）；创建时必填 |
+| `source_ip` | string | 本端与邻居建连使用的源地址（`update-source`），单播 IPv4；`""` 清除 |
+| `password` | string | BGP TCP-MD5 密钥，1~80 个可打印 ASCII 字符（不含空格）；`""` 表示清除 |
+| `bfd` | bool | 为该邻居启用 BFD |
+| `bfd_min_rx_ms` / `bfd_min_tx_ms` | int | BFD 收发间隔，0 = 平台默认，否则 50~30000；需同时 `bfd: true` |
+| `bfd_multiplier` | int | BFD 检测倍数，0 = 平台默认，否则 1~50；需同时 `bfd: true` |
+| `max_prefix` | int | 允许接收的最大前缀数，0 = 不限制（1~4294967295） |
+| `max_prefix_warning_only` | bool | 超限只告警不断开；需 `max_prefix > 0` |
+| `route_reflector_client` | bool | 本机作为路由反射器时把该邻居标记为 client；**只能用于 iBGP**（`remote_as` 等于本地 AS），否则 400 |
+
+邻居地址本身是 URL 路径里的 `{ip}`（IPv4，也是对象标识），不在 body 里。
+
+`PUT` 是**局部更新**：未出现在 body 里的字段保持原值，显式给出才覆盖（含清空）。
+因此给已存在的邻居改 `remote_as` 不需要重发密码。
+
+密码的两个特殊约定：
+
+- **只写**：`GET .../bgp-neighbors` 只返回 `password_set: true/false`，从不回显明文；
+  操作记录的 `changes`/`delta` 里也是 `***`。
+- **不参与收敛验证**：设备不回显 TCP-MD5 密钥，下发后的验证（`ComputeVerifiable`）忽略该字段；
+  因此带密码的邻居每次收敛都会重新下发一次密码（幂等）。密码随权威模型落库
+  （`data_dir` 下的 SQLite），库文件权限按凭据对待。
+
+### 物理口与 VLAN 子接口
+
+子接口建在**三层模式**的物理口上（`Ethernet1/1.100` + `encapsulation dot1q 100`）。
+
+```bash
+# 1) 纳管物理口并置为三层（mode 缺省即 l3）
+curl -s -X PUT -H 'Content-Type: application/json' -d '{"mode":"l3"}' \
+  http://localhost:8080/api/v1/switches/sw-core-1/ports/Ethernet1%2F1
+
+# 2) 建子接口（IP 必填；vrf 选填）
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"ip":"10.0.0.1/24","vrf":"CUSTOMER1"}' \
+  http://localhost:8080/api/v1/switches/sw-core-1/ports/Ethernet1%2F1/sub-interfaces/100
+```
+
+- **路径里的端口名**：`/` 必须编码为 `%2F`（`Ethernet1%2F1`），否则会被当成路径分隔符。
+- `PUT /ports/{port}` 的 `mode`：`l3`（`no switchport`）或 `l2`（`switchport`）；
+  **缺省时新建为 `l3`、已存在则不修改**。
+- **端口存在子接口时，禁止切换 `l2`↔`l3`**（返回 400，提示先删子接口）。
+- 子接口 `vlan` 是 802.1Q tag，范围 **1~4094**（与 SVI 的 2~4094 不同）；只支持 dot1q，不含 QinQ。
+- VRF 绑定两种等价写法：创建/更新时在 body 里给 `vrf`；或单独的
+  `PUT .../sub-interfaces/{vlan}/vrf`（与 SVI 一致，幂等）。body 里 `vrf` 缺省 = 不修改，
+  `""` = 移回全局路由表；非空时该 VRF 必须在管理中。移出用 `DELETE .../vrf`（幂等）。
+- 端口对象**没有删除操作**：恢复二层用 `PUT /ports/{port}` + `{"mode":"l2"}`；取消纳管需人工处理。
+- 下发顺序由后端保证：端口 → 子接口增改 → 子接口删。
 
 ### 业务变更只提交"期望态"
 - `PUT` 返回 202 时，权威模型已更新并持久化——此时 `GET` 就能看到新状态，**但设备还没变**。
@@ -151,7 +215,8 @@ netconf max-sessions 4            # 默认 1，需给运维/监控留口
 
 ### 对账会覆盖管理域内的手工改动
 对账 diff 是"权威模型 vs 设备实际"：管理域（VRF/VLAN/SVI/BGP）内任何非控制器所为的
-改动，在下个对账周期都会被纠正回权威态。未管理的配置不受任何影响。
+改动，会在下一次收敛（启动对账，或该设备后续任意一次 apply 的全量 diff）时被纠正回权威态。
+未管理的配置不受任何影响。
 
 ## 配置
 
@@ -166,7 +231,7 @@ netconf max-sessions 4            # 默认 1，需给运维/监控留口
 > 注意：本项目处于开发期。schema 迁移由二进制启动时自动执行；更早的 schema 不兼容，
 > 请删除 `data_dir` 重建。
 >
-> 设备清单以 YAML 为唯一事实来源：从 YAML 移除设备后，API 与周期对账立即不再管理它，
+> 设备清单以 YAML 为唯一事实来源：从 YAML 移除设备后，API 与对账立即不再管理它，
 > 但其历史操作仍保留在 DB（重新加入清单后会沿用原有权威模型）。
 
 ## 开发

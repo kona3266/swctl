@@ -1,4 +1,4 @@
-// Package model 定义交换机的全量配置模型（业务管理域：VRF/VLAN/SVI/BGP）、
+// Package model 定义交换机的全量配置模型（业务管理域：VRF/VLAN/SVI/物理口与子接口/BGP）、
 // 业务变更操作与模型差异计算。
 //
 // 模型与厂商无关：不含任何命令语法、平台名称或平台策略。
@@ -43,6 +43,10 @@ type DeviceConfig struct {
 	VRFs  map[string]*VRF `json:"vrfs"`
 	VLANs map[int]*VLAN   `json:"vlans"`
 	SVIs  map[int]*SVI    `json:"svis"` // VLAN 三层接口，key = VLAN ID
+	// Ports：被管理的物理口（二层/三层模式），key = 归一化端口名
+	Ports map[string]*Port `json:"ports"`
+	// SubInterfaces：物理口上的 VLAN 子接口，key = "端口.802.1Q tag"
+	SubInterfaces map[string]*SubInterface `json:"sub_interfaces"`
 	// BGPPeers：VRF 内 BGP 邻居，key = "vrf/邻居IP"
 	BGPPeers map[string]*BGPPeer `json:"bgp_peers"`
 	// BGPASN 是本地 BGP AS 号（渲染上下文用，不参与收敛比对）
@@ -53,6 +57,7 @@ type DeviceConfig struct {
 func NewDeviceConfig() *DeviceConfig {
 	return &DeviceConfig{
 		VRFs: map[string]*VRF{}, VLANs: map[int]*VLAN{}, SVIs: map[int]*SVI{},
+		Ports: map[string]*Port{}, SubInterfaces: map[string]*SubInterface{},
 		BGPPeers: map[string]*BGPPeer{},
 	}
 }
@@ -71,6 +76,14 @@ func (c *DeviceConfig) Clone() *DeviceConfig {
 	for k, v := range c.SVIs {
 		vv := *v
 		out.SVIs[k] = &vv
+	}
+	for k, v := range c.Ports {
+		vv := *v
+		out.Ports[k] = &vv
+	}
+	for k, v := range c.SubInterfaces {
+		vv := *v
+		out.SubInterfaces[k] = &vv
 	}
 	for k, v := range c.BGPPeers {
 		vv := *v

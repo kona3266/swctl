@@ -10,7 +10,9 @@ import (
 )
 
 // PutBGPNeighbor 配置 VRF 内的 BGP 邻居（该 VRF 需在管理中）。
-func (s *Service) PutBGPNeighbor(ctx context.Context, switchName, vrf, neighbor, remoteAS, sourceIP string, expectedVersion int64) (*store.Operation, error) {
+//
+// params 是局部更新语义：nil 字段保持不变，非 nil 字段覆盖（含显式清空）。
+func (s *Service) PutBGPNeighbor(ctx context.Context, switchName, vrf, neighbor string, params model.BGPPeerParams, sourceIP string, expectedVersion int64) (*store.Operation, error) {
 	return s.applyChange(ctx, switchName, sourceIP, "bgp-neighbor", vrf+"/"+neighbor, "apply", expectedVersion,
 		func(cfg *model.DeviceConfig, _ model.Constraints) error {
 			// 本地 AS：设备清单声明兜底（设备已有 BGP 时解析值优先）
@@ -23,7 +25,7 @@ func (s *Service) PutBGPNeighbor(ctx context.Context, switchName, vrf, neighbor,
 				return errInvalid("无法确定本地 BGP AS 号：设备未运行 BGP，" +
 					"请在设备清单中配置 bgp_asn")
 			}
-			return cfg.UpsertBGPPeer(vrf, neighbor, remoteAS)
+			return cfg.UpsertBGPPeer(vrf, neighbor, params)
 		})
 }
 

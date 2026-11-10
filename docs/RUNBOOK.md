@@ -73,7 +73,7 @@ show nxapi                         # 确认 NX-API 状态（HTTP/HTTPS 端口）
 ## 3. 首次接入交换机
 
 **设备清单以 YAML 为唯一事实来源。** 从 YAML 删除设备并重启后，该设备不再出现在
-`/switches`、也不能再通过 API 操作或参与周期对账；历史操作仍保留。
+`/switches`、也不能再通过 API 操作或参与对账；历史操作仍保留。
 重新加回清单会沿用原来的权威模型。
 
 **新交换机在控制器里的权威模型是空的（不导入设备现有配置）**，直接通过业务接口创建对象即可：
@@ -114,11 +114,30 @@ curl -s -X PUT -H 'Content-Type: application/json' -d '{"remote_as":"65001"}' \
   http://<host>:8080/api/v1/switches/<name>/vrfs/CUSTOMER1/bgp-neighbors/10.0.0.2
 curl -s -X DELETE http://<host>:8080/api/v1/switches/<name>/vrfs/CUSTOMER1/bgp-neighbors/10.0.0.2
 
+# 物理口：纳管并置为三层（mode 缺省即 l3）
+curl -s -X PUT -H 'Content-Type: application/json' -d '{"mode":"l3"}' \
+  http://<host>:8080/api/v1/switches/<name>/ports/Ethernet1%2F1
+
+# 物理口上的 VLAN 子接口（IP 必填；vrf 选填）
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"ip":"10.0.0.1/24","vrf":"CUSTOMER1"}' \
+  http://<host>:8080/api/v1/switches/<name>/ports/Ethernet1%2F1/sub-interfaces/100
+# 子接口绑定 / 解绑 VRF（与 SVI 一致）
+curl -s -X PUT -H 'Content-Type: application/json' -d '{"vrf":"CUSTOMER1"}' \
+  http://<host>:8080/api/v1/switches/<name>/ports/Ethernet1%2F1/sub-interfaces/100/vrf
+curl -s -X DELETE \
+  http://<host>:8080/api/v1/switches/<name>/ports/Ethernet1%2F1/sub-interfaces/100/vrf
+
+curl -s -X DELETE \
+  http://<host>:8080/api/v1/switches/<name>/ports/Ethernet1%2F1/sub-interfaces/100
+
 # 跟踪操作（返回体里有操作 id）
 curl http://<host>:8080/api/v1/operations/<operation_id>
 curl 'http://<host>:8080/api/v1/operations?switch=<name>&limit=20'
 ```
 
+- 端口名里的 `/` 必须编码为 `%2F`（如 `Ethernet1%2F1`），否则会被当成路径分隔符。
+- 端口存在子接口时不能切换二层/三层；先删子接口。恢复二层用 `PUT .../ports/<port>` + `{"mode":"l2"}`。
 - `PUT`/`DELETE` 立即返回 202：**期望态已入库**，设备由后台收敛。
 - 幂等重复提交 → 200 + `no_change`。
 - 设备跟没跟上：看 `/switches` 的 `sync_state`（`synced` / `drifted`）。
@@ -137,7 +156,7 @@ curl 'http://<host>:8080/api/v1/operations?switch=<name>&limit=20'
 
 ### 操作 interrupted / 控制器意外重启
 - 启动时自动把未完成操作标记 `interrupted`，并把对应交换机置 `drifted`；
-  随后的（启动后立即触发 + 周期的）对账会把设备状态收敛回期望态。
+  随后的启动对账会把设备状态收敛回期望态。
 - 人工确认：`GET /api/v1/operations/<id>` + `GET /api/v1/switches`。
 
 ### 设备上有"未托管对象"报告

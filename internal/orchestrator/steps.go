@@ -184,7 +184,8 @@ func (run *opRun) verifyConverged(target *model.DeviceConfig) error {
 		if snap.Config == nil {
 			return fmt.Errorf("验证时后端未返回配置模型")
 		}
-		if remaining := model.Compute(target, snap.Config); !remaining.Empty() {
+		// 验证用 ComputeVerifiable：BGP 密码是只写字段，设备不回显，不能参与比对。
+		if remaining := model.ComputeVerifiable(target, snap.Config); !remaining.Empty() {
 			s := summarize(remaining)
 			s.Remaining = remaining.Count()
 			run.writeChanges(s)

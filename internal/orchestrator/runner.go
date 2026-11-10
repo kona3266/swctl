@@ -70,7 +70,7 @@ func New(deps Deps) *Runner {
 // Start 启动执行引擎：回收中断操作，并完成所有设备的初始化与首轮对账投递。
 // 任一设备初始化失败即返回错误（由调用方决定退出），不会跳过对账继续运行。
 //
-// 这里没有周期性对账：漂移发现依赖人工/CI 触发的对账。
+// 启动后不再对账：运行期间的漂移不会被自动发现，也无法主动触发对账。
 func (r *Runner) Start(ctx context.Context) error {
 	ctx, r.stopCancel = context.WithCancel(ctx)
 	r.recoverInterrupted(ctx)
