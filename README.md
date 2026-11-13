@@ -1,241 +1,272 @@
-# switchctl — 面向业务的交换机配置控制器
+# switchctl - a business-level switch configuration controller
 
-调用方用**业务语义**操作交换机（创建 VRF、删除 VLAN……），不需要接触任何 CLI。
-控制器维护一份**权威配置模型**（内存为主 + DB 持久化，版本化），业务变更直接提交到模型，
-再由后台把**期望态**收敛到设备上；漂移修复在启动对账时进行。
+Callers operate switches with **business-level semantics** (create a VRF, delete a VLAN, ...)
+without touching any CLI. The controller keeps an **authoritative configuration model**
+(in-memory first, persisted to a DB, versioned); changes are submitted to that model,
+and a background worker converges the **desired state** onto the devices.
+Drift repair happens during the startup reconciliation.
 
 ```
-期望态（每交换机一份全量模型：VRF/VLAN/SVI/BGP，版本化）
-   内存（读快）── DB 持久化（重启恢复）── 版本历史（审计）
+Desired state (one full model per switch: VRF/VLAN/SVI/port/sub-interface/BGP, versioned)
+   in-memory (fast reads) -- DB persistence (restart recovery) -- version history (audit)
 
-写接口（业务变更）：
-   API → 校验 → 内存模型应用变更 → 落 DB（版本+1）→ 202 返回
-        （期望态此刻已提交，"设备怎么变"是之后的步骤）
-   后台队列（每交换机串行）：
-        拉设备实际配置 → diff(目标, 实际) → 一次原子提交下发整批差异 → 再拉验证 → 持久化
-        成功 → 标记 verified；失败 → 设备保持原样（原子性保证），期望态回退到上一版本，标记 drifted
+Write path (business change):
+   API -> validate -> apply to in-memory model -> persist (version+1) -> 202
+        (the desired state is committed at this point; "how the device changes" comes later)
+   Background queue (serial per switch):
+        pull device config -> diff(target, actual) -> push the whole batch in ONE atomic commit
+        -> pull again to verify -> persist
+        success -> mark verified; failure -> device unchanged (atomicity), desired state rolls
+        back to the previous version, marked drifted
 
-漂移发现（仅启动时）：
-   启动后首轮对账（建立 verified 基线）；运行期间不自动发现漂移
+Drift discovery (startup only):
+   the first reconciliation after startup establishes the verified baseline;
+   drift is not discovered automatically while running
 ```
 
-- **目标平台**：Cisco Nexus 9000（standalone NX-OS）、锐捷 RG-S6580（RGOS 12.5）
-- **南向**：模型驱动（Nexus 走 **NX-API**，锐捷走 **NETCONF**）——**尚未实现，见下方状态**
-- **业务对象**：VRF、VLAN、SVI（VLAN 三层接口）、VRF 内 BGP 邻居
-- **存储**：SQLite（WAL）
-- **并发**：每交换机一条 FIFO 队列串行执行，交换机间并行
-- 完整设计文档：[docs/DESIGN.md](docs/DESIGN.md)；运维手册：[docs/RUNBOOK.md](docs/RUNBOOK.md)
+- **Target platforms**: Cisco Nexus 9000 (standalone NX-OS), Ruijie RG-S6580 (RGOS 12.5)
+- **Southbound**: model-driven (Nexus via **NX-API**, Ruijie via **NETCONF**) - **not implemented, see status below**
+- **Objects**: VRF, VLAN, SVI (VLAN L3 interface), physical port mode, VLAN sub-interface,
+  BGP neighbors inside a VRF
+- **Storage**: SQLite (WAL)
+- **Concurrency**: one FIFO queue per switch (serial within a switch, parallel across switches)
+- Design documentation: [docs/DESIGN.md](docs/DESIGN.md); runbook: [docs/RUNBOOK.md](docs/RUNBOOK.md)
 
-## 当前实现状态（重要）
+## Current status (important)
 
-| 能力 | 状态 |
+| Capability | Status |
 |---|---|
-| 北向 REST API、权威模型、操作记录 | ✅ 已实现 |
-| 设备级串行队列、崩溃恢复、verified 版本、指标 | ✅ 已实现 |
-| 南向下发通道（NX-API / NETCONF） | ❌ **未实现** |
-| SSH CLI 会话引擎与 IOS/RGOS 文本方言 | 🗑 已移除（不再维护） |
+| Northbound REST API, authoritative model, operation records | Implemented |
+| Per-device serial queue, crash recovery, verified versions, metrics | Implemented |
+| Southbound push (NX-API / NETCONF) | **Not implemented** |
+| SSH CLI session engine and IOS/RGOS text dialects | Removed (no longer maintained) |
 
-**因此当前处于 fail-fast 状态**：配置了设备但没有对应的 southbound 后端时，
-控制器会在启动阶段因设备初始化失败而**直接退出**（不会以“只记账”模式继续运行），
-直到模型驱动后端接入。
+**The controller therefore fails fast**: if devices are configured but no southbound backend
+exists for them, startup fails during device initialization and the process **exits**
+(it does not keep running in a "bookkeeping only" mode) until the model-driven backends land.
 
-## 快速开始
+## Quick start
 
 ```bash
 make build
-cp configs/switchctl.example.yaml configs/switchctl.yaml   # 按需修改
-export SW1_USER=admin SW1_PASSWORD=... SW2_USER=admin SW2_PASSWORD=...
+cp configs/switchctl.example.yaml configs/switchctl.yaml   # adjust as needed
+export NX1_USER=admin NX1_PASSWORD=... RG1_USER=admin RG1_PASSWORD=...
 ./bin/switchctl -config configs/switchctl.yaml
 
 curl -s localhost:8080/api/v1/switches
 curl -s -X PUT -H 'Content-Type: application/json' -d '{"rd":"65000:1"}' \
-  http://localhost:8080/api/v1/switches/sw-core-1/vrfs/CUSTOMER1
+  http://localhost:8080/api/v1/switches/nx-core-1/vrfs/CUSTOMER1
 ```
 
-设备侧前置条件（NETCONF 目标）：
+Device-side prerequisites (NETCONF targets):
 
 ```
-netconf enable                    # 锐捷：默认已开；端口 830
-netconf capability candidate      # 关键：开启候选配置才有 commit/discard
-netconf max-sessions 4            # 默认 1，需给运维/监控留口
+netconf enable                    # Ruijie: enabled by default; port 830
+netconf capability candidate      # required: candidate config is what gives commit/discard
+netconf max-sessions 4            # default is 1; leave room for operators/monitoring
 ```
 
-## REST API（`/api/v1`）
+## REST API (`/api/v1`)
 
-无鉴权设计：面向内网/受信环境，不内置认证与 TLS；请只绑定管理网地址，
-由网络层（防火墙/反向代理/ACL）控制访问。
+No authentication by design: intended for internal/trusted networks, with no built-in auth or TLS.
+Bind only to a management address and control access at the network layer
+(firewall / reverse proxy / ACL).
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 |---|---|---|
-| GET | `/switches` | 交换机列表（sync_state、版本、最近对账时间） |
-| GET | `/switches/{name}/vrfs` | 查询 VRF（读权威模型） |
-| PUT | `/switches/{name}/vrfs/{vrf}` | 创建/更新 VRF，body `{"rd":"65000:1"}` |
-| DELETE | `/switches/{name}/vrfs/{vrf}` | 删除 VRF（仅限管理中的对象） |
-| GET | `/switches/{name}/vlans` | 查询 VLAN（读权威模型） |
-| PUT | `/switches/{name}/vlans/{id}` | 创建/更新 VLAN，body `{"name":"OFFICE"}` |
-| DELETE | `/switches/{name}/vlans/{id}` | 删除 VLAN（仅限管理中的对象） |
-| GET | `/switches/{name}/vlan-interfaces` | 查询 VLAN 三层接口（SVI） |
-| PUT | `/switches/{name}/vlan-interfaces/{vlan}` | 创建/更新 SVI，body `{"ip":"10.0.0.1/24"}`（IP 必填） |
-| DELETE | `/switches/{name}/vlan-interfaces/{vlan}` | 删除 SVI |
-| PUT | `/switches/{name}/vlan-interfaces/{vlan}/vrf` | **SVI 加入 VRF**，body `{"vrf":"CUSTOMER1"}` |
-| DELETE | `/switches/{name}/vlan-interfaces/{vlan}/vrf` | **SVI 离开 VRF**（幂等） |
-| GET | `/switches/{name}/ports` | 查询受管物理口（二层/三层模式） |
-| PUT | `/switches/{name}/ports/{port}` | 纳管物理口/设置模式，body `{"mode":"l3"}` 或 `{"mode":"l2"}`（见下） |
-| GET | `/switches/{name}/ports/{port}/sub-interfaces` | 查询该端口下的 VLAN 子接口 |
-| PUT | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}` | **创建/更新子接口**，body `{"ip":"10.0.0.1/24","vrf":"CUSTOMER1"}` |
-| DELETE | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}` | **删除子接口** |
-| PUT | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}/vrf` | **子接口加入 VRF**，body `{"vrf":"CUSTOMER1"}` |
-| DELETE | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}/vrf` | **子接口离开 VRF**（幂等） |
-| GET | `/switches/{name}/vrfs/{vrf}/bgp-neighbors` | 查询 VRF 内 BGP 邻居 |
-| PUT | `/switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` | **配置 BGP 邻居**，body 见下 |
-| DELETE | `/switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` | **删除 BGP 邻居** |
-| GET | `/operations/{id}` | 操作详情（含变更摘要、抽象差异 delta、失败原因） |
-| GET | `/operations?switch=&status=&kind=&limit=` | 操作列表 |
-| GET | `/metrics` | Prometheus 文本格式指标 |
+| GET | `/switches` | Switch list (sync_state, version, last reconciliation time) |
+| GET | `/switches/{name}/vrfs` | List VRFs (reads the authoritative model) |
+| PUT | `/switches/{name}/vrfs/{vrf}` | Create/update a VRF, body `{"rd":"65000:1"}` |
+| DELETE | `/switches/{name}/vrfs/{vrf}` | Delete a VRF (managed objects only) |
+| GET | `/switches/{name}/vlans` | List VLANs (reads the authoritative model) |
+| PUT | `/switches/{name}/vlans/{id}` | Create/update a VLAN, body `{"name":"OFFICE"}` |
+| DELETE | `/switches/{name}/vlans/{id}` | Delete a VLAN (managed objects only) |
+| GET | `/switches/{name}/vlan-interfaces` | List VLAN L3 interfaces (SVIs) |
+| PUT | `/switches/{name}/vlan-interfaces/{vlan}` | Create/update an SVI, body `{"ip":"10.0.0.1/24"}` (IP required) |
+| DELETE | `/switches/{name}/vlan-interfaces/{vlan}` | Delete an SVI |
+| PUT | `/switches/{name}/vlan-interfaces/{vlan}/vrf` | **Bind the SVI to a VRF**, body `{"vrf":"CUSTOMER1"}` |
+| DELETE | `/switches/{name}/vlan-interfaces/{vlan}/vrf` | **Unbind the SVI from its VRF** (idempotent) |
+| GET | `/switches/{name}/ports` | List managed physical ports (L2/L3 mode) |
+| PUT | `/switches/{name}/ports/{port}` | Manage a port / set its mode, body `{"mode":"l3"}` or `{"mode":"l2"}` (see below) |
+| GET | `/switches/{name}/ports/{port}/sub-interfaces` | List the port's VLAN sub-interfaces |
+| PUT | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}` | **Create/update a sub-interface**, body `{"ip":"10.0.0.1/24","vrf":"CUSTOMER1"}` |
+| DELETE | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}` | **Delete a sub-interface** |
+| PUT | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}/vrf` | **Bind the sub-interface to a VRF**, body `{"vrf":"CUSTOMER1"}` |
+| DELETE | `/switches/{name}/ports/{port}/sub-interfaces/{vlan}/vrf` | **Unbind the sub-interface** (idempotent) |
+| GET | `/switches/{name}/vrfs/{vrf}/bgp-neighbors` | List BGP neighbors in the VRF |
+| PUT | `/switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` | **Configure a BGP neighbor**, body see below |
+| DELETE | `/switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` | **Delete a BGP neighbor** |
+| GET | `/operations/{id}` | Operation details (change summary, abstract delta, failure reason) |
+| GET | `/operations?switch=&status=&kind=&limit=` | List operations |
+| GET | `/metrics` | Prometheus text-format metrics |
 
-变更类接口**异步**：立即返回 202 + `Location: /api/v1/operations/{id}`（幂等变更直接
-返回 200 + `no_change` 操作）。
+Mutating endpoints are **asynchronous**: they return `202 + Location: /api/v1/operations/{id}`
+(idempotent changes return `200` with a `no_change` operation directly).
 
-**乐观并发**：可用 `If-Match: <version>` 或 `?expected_version=<version>` 声明本次编辑基于
-哪个期望版本；版本已被别人推进时返回 **409**，避免静默覆盖。
+**Optimistic concurrency**: use `If-Match: <version>` or `?expected_version=<version>` to declare
+which desired version your edit is based on. If the version has already moved on, the request
+fails with **409** instead of silently overwriting.
 
-状态码：400 参数非法（命名/RD 格式/保留 VLAN、If-Match 非数字等）；
-404 交换机或对象不在管理范围；**409** 版本冲突 / 目标对象不在管理中（防误删未托管配置）；
-422 平台不支持；**429** 该设备操作队列已满（请退避重试）；503 执行引擎不可用。
+Status codes: 400 invalid parameters (names / RD format / reserved VLANs / non-numeric If-Match, ...);
+404 unknown switch or object; **409** version conflict / target object not managed
+(guards against deleting unmanaged config); 422 platform unsupported; **429** the device's
+operation queue is full (retry with backoff); 503 execution engine unavailable.
 
-## 语义要点（重要）
+## Semantics (important)
 
-### 业务对象与依赖守卫
+### Objects and dependency guards
 
-| 对象 | 说明 | 依赖守卫 |
+| Object | Description | Dependency guards |
 |---|---|---|
-| VRF | NX-OS `vrf context` / 锐捷 `ip vrf`，RD 必填 | — |
-| VLAN | `vlan N`（+ name） | VLAN 1 与 Cisco 保留 1002~1005 禁止操作 |
-| SVI | `interface VlanN` + IP（必填，CIDR） | **只能建在管理中的 VLAN 上**；VLAN 有 SVI 时禁止删 VLAN |
-| SVI↔VRF | 加入/移出 VRF | VRF 与 SVI 都须在管理中；绑定时禁止删 VRF |
-| 物理口 | 二层/三层模式（`switchport` / `no switchport`） | **有子接口时禁止切换模式** |
-| VLAN 子接口 | `interface <Port>.<tag>` + `encapsulation dot1q <tag>` + IP | 父口须已纳管**且为三层模式**；IP 必填；绑定 VRF 时禁止删 VRF |
-| BGP 邻居 | VRF 内 address-family + neighbor | VRF 须在管理中；配置邻居时禁止删 VRF |
+| VRF | NX-OS `vrf context` / Ruijie `ip vrf`, RD required | - |
+| VLAN | `vlan N` (+ name) | VLAN 1 and Cisco-reserved 1002-1005 are rejected |
+| SVI | `interface VlanN` + IP (required, CIDR) | **can only be created on a managed VLAN**; deleting a VLAN with an SVI is rejected |
+| SVI<->VRF | Bind/unbind | both the VRF and the SVI must be managed; deleting a bound VRF is rejected |
+| Physical port | L2/L3 mode (`switchport` / `no switchport`) | **mode change is rejected while sub-interfaces exist** |
+| VLAN sub-interface | `interface <Port>.<tag>` + `encapsulation dot1q <tag>` + IP | parent port must be managed **and in L3 mode**; IP required; deleting a bound VRF is rejected |
+| BGP neighbor | address-family + neighbor inside a VRF | the VRF must be managed; deleting a VRF with neighbors is rejected |
 
-本地 BGP AS 号：设备已在跑 BGP 时自动解析；设备尚未运行 BGP 时须在设备清单声明
-`bgp_asn`，否则创建邻居返回 400。
+Local BGP AS: parsed from the device when BGP is already running; otherwise it must be declared
+as `bgp_asn` in the device inventory, or creating a neighbor returns 400.
 
-### BGP 邻居参数
+### BGP neighbor parameters
 
-`PUT /switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` 的 body（除 `remote_as` 外均可选）：
+Body of `PUT /switches/{name}/vrfs/{vrf}/bgp-neighbors/{ip}` (everything except `remote_as` is optional):
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |---|---|---|
-| `remote_as` | string | 对端 AS 号（1~4294967295）；创建时必填 |
-| `source_ip` | string | 本端与邻居建连使用的源地址（`update-source`），单播 IPv4；`""` 清除 |
-| `password` | string | BGP TCP-MD5 密钥，1~80 个可打印 ASCII 字符（不含空格）；`""` 表示清除 |
-| `bfd` | bool | 为该邻居启用 BFD |
-| `bfd_min_rx_ms` / `bfd_min_tx_ms` | int | BFD 收发间隔，0 = 平台默认，否则 50~30000；需同时 `bfd: true` |
-| `bfd_multiplier` | int | BFD 检测倍数，0 = 平台默认，否则 1~50；需同时 `bfd: true` |
-| `max_prefix` | int | 允许接收的最大前缀数，0 = 不限制（1~4294967295） |
-| `max_prefix_warning_only` | bool | 超限只告警不断开；需 `max_prefix > 0` |
-| `route_reflector_client` | bool | 本机作为路由反射器时把该邻居标记为 client；**只能用于 iBGP**（`remote_as` 等于本地 AS），否则 400 |
+| `remote_as` | string | Peer AS number (1-4294967295); required on create |
+| `source_ip` | string | Local source address used to reach the peer (`update-source`), unicast IPv4; `""` clears |
+| `password` | string | BGP TCP-MD5 key, 1-80 printable ASCII characters (no spaces); `""` clears |
+| `bfd` | bool | Enable BFD for this neighbor |
+| `bfd_min_rx_ms` / `bfd_min_tx_ms` | int | BFD receive/transmit interval: 0 = platform default, otherwise 50-30000; requires `bfd: true` |
+| `bfd_multiplier` | int | BFD detection multiplier: 0 = platform default, otherwise 1-50; requires `bfd: true` |
+| `max_prefix` | int | Maximum prefixes accepted from the peer; 0 = unlimited (otherwise 1-4294967295) |
+| `max_prefix_warning_only` | bool | Warn only, never tear the session down; requires `max_prefix > 0` |
+| `route_reflector_client` | bool | Mark the neighbor as a client of this route reflector; **iBGP only** (`remote_as` equals the local AS), otherwise 400 |
 
-邻居地址本身是 URL 路径里的 `{ip}`（IPv4，也是对象标识），不在 body 里。
+The neighbor address itself is the `{ip}` path segment (IPv4, also the object identity); it is not a body field.
 
-`PUT` 是**局部更新**：未出现在 body 里的字段保持原值，显式给出才覆盖（含清空）。
-因此给已存在的邻居改 `remote_as` 不需要重发密码。
+`PUT` is a **partial update**: fields omitted from the body keep their current value; only fields
+present are applied (including explicit clearing). Changing `remote_as` on an existing neighbor
+therefore does not require re-sending the password.
 
-密码的两个特殊约定：
+Two special rules for the password:
 
-- **只写**：`GET .../bgp-neighbors` 只返回 `password_set: true/false`，从不回显明文；
-  操作记录的 `changes`/`delta` 里也是 `***`。
-- **不参与收敛验证**：设备不回显 TCP-MD5 密钥，下发后的验证（`ComputeVerifiable`）忽略该字段；
-  因此带密码的邻居每次收敛都会重新下发一次密码（幂等）。密码随权威模型落库
-  （`data_dir` 下的 SQLite），库文件权限按凭据对待。
+- **Write-only**: `GET .../bgp-neighbors` only returns `password_set: true/false` and never echoes
+  the secret; operation `changes`/`delta` also show `***`.
+- **Excluded from convergence verification**: devices do not echo the TCP-MD5 key, so post-push
+  verification (`ComputeVerifiable`) ignores the field; consequently a neighbor with a password is
+  re-pushed on every convergence (the operation is idempotent). The password is stored with the
+  authoritative model (SQLite under `data_dir`), so treat the database file as a credential.
 
-### 物理口与 VLAN 子接口
+### Physical ports and VLAN sub-interfaces
 
-子接口建在**三层模式**的物理口上（`Ethernet1/1.100` + `encapsulation dot1q 100`）。
+Sub-interfaces live on a **Layer-3** physical port (`Ethernet1/1.100` + `encapsulation dot1q 100`).
 
 ```bash
-# 1) 纳管物理口并置为三层（mode 缺省即 l3）
+# 1) manage the physical port and set it to Layer 3 (mode defaults to l3)
 curl -s -X PUT -H 'Content-Type: application/json' -d '{"mode":"l3"}' \
-  http://localhost:8080/api/v1/switches/sw-core-1/ports/Ethernet1%2F1
+  http://localhost:8080/api/v1/switches/nx-core-1/ports/Ethernet1%2F1
 
-# 2) 建子接口（IP 必填；vrf 选填）
+# 2) create the sub-interface (IP required; vrf optional)
 curl -s -X PUT -H 'Content-Type: application/json' \
   -d '{"ip":"10.0.0.1/24","vrf":"CUSTOMER1"}' \
-  http://localhost:8080/api/v1/switches/sw-core-1/ports/Ethernet1%2F1/sub-interfaces/100
+  http://localhost:8080/api/v1/switches/nx-core-1/ports/Ethernet1%2F1/sub-interfaces/100
 ```
 
-- **路径里的端口名**：`/` 必须编码为 `%2F`（`Ethernet1%2F1`），否则会被当成路径分隔符。
-- `PUT /ports/{port}` 的 `mode`：`l3`（`no switchport`）或 `l2`（`switchport`）；
-  **缺省时新建为 `l3`、已存在则不修改**。
-- **端口存在子接口时，禁止切换 `l2`↔`l3`**（返回 400，提示先删子接口）。
-- 子接口 `vlan` 是 802.1Q tag，范围 **1~4094**（与 SVI 的 2~4094 不同）；只支持 dot1q，不含 QinQ。
-- VRF 绑定两种等价写法：创建/更新时在 body 里给 `vrf`；或单独的
-  `PUT .../sub-interfaces/{vlan}/vrf`（与 SVI 一致，幂等）。body 里 `vrf` 缺省 = 不修改，
-  `""` = 移回全局路由表；非空时该 VRF 必须在管理中。移出用 `DELETE .../vrf`（幂等）。
-- 端口对象**没有删除操作**：恢复二层用 `PUT /ports/{port}` + `{"mode":"l2"}`；取消纳管需人工处理。
-- 下发顺序由后端保证：端口 → 子接口增改 → 子接口删。
+- **Port name in the path**: `/` must be encoded as `%2F` (`Ethernet1%2F1`), otherwise it is treated
+  as a path separator.
+- `mode` in `PUT /ports/{port}`: `l3` (`no switchport`) or `l2` (`switchport`).
+  **When omitted, a new port defaults to `l3`; an existing port is left unchanged.**
+- **While the port has sub-interfaces, switching `l2`<->`l3` is rejected** (400, asking you to delete
+  the sub-interfaces first).
+- Sub-interface `vlan` is the 802.1Q tag, range **1-4094** (unlike the SVI range of 2-4094);
+  dot1q only, no QinQ.
+- VRF binding has two equivalent forms: pass `vrf` in the create/update body, or use the dedicated
+  `PUT .../sub-interfaces/{vlan}/vrf` endpoint (same as SVIs, idempotent). In the body, an omitted
+  `vrf` means "no change" and `""` moves the interface back to the global table; a non-empty VRF
+  must be managed. Unbind with `DELETE .../vrf` (idempotent).
+- Port objects have **no delete operation**: restore Layer 2 with `PUT /ports/{port}` +
+  `{"mode":"l2"}`; removing a port from management is a manual operation.
+- Push order is guaranteed by the backend: ports -> sub-interface add/update -> sub-interface delete.
 
-### 业务变更只提交"期望态"
-- `PUT` 返回 202 时，权威模型已更新并持久化——此时 `GET` 就能看到新状态，**但设备还没变**。
-  设备的跟进情况看 `/switches` 的 `sync_state` 或操作结果。
-- **幂等**：重复提交相同内容 → `no_change`（不触碰设备）。`DELETE` 幂等同理。
-- `RD` 必填；VLAN `name` 可选（不提供 = 不改名）。
-- 保留资源硬约束：VLAN 1、Cisco 保留 VLAN 1002~1005 禁止操作。
+### A business change only submits "desired state"
+
+- When `PUT` returns 202 the authoritative model is already updated and persisted - a subsequent
+  `GET` shows the new state, **but the device has not changed yet**. Track device progress via
+  `sync_state` or the operation record.
+- **Idempotent**: submitting the same content again yields `no_change` (no device access).
+  `DELETE` behaves the same way.
+- `RD` is required; VLAN `name` is optional (omitted = do not rename).
+- Hard reservation constraints: VLAN 1 and Cisco-reserved VLANs 1002-1005 are rejected.
 
 ### sync_state
-| 值 | 含义 |
+
+| Value | Meaning |
 |---|---|
-| `unknown` | 从未对账 |
-| `synced` | 对账确认一致 |
-| `drifted` | 设备与期望态不一致（操作失败/中断等），需触发对账收敛 |
+| `unknown` | never reconciled |
+| `synced` | reconciliation confirmed consistency |
+| `drifted` | device and desired state disagree (failed/interrupted operation, ...); needs reconciliation to converge |
 
 ### desired / verified
 
-- `/switches` 同时返回 `version`（期望版本）与 `verified_version`（最后验证落地的版本）。
-  **`version > verified_version` 即存在尚未落到设备的变更**——判断"我的操作完成没有"比轮询
-  操作记录更稳。
+- `/switches` returns both `version` (desired version) and `verified_version` (the last version
+  verified as landed). **`version > verified_version` means changes have not reached the device**,
+  which is a more reliable "is my operation done?" signal than polling operation records.
 
-- 下发失败时**设备保持原样**（后端在一次原子提交内应用整批差异），控制器把**期望态回退到本操作之前的版本**，操作标记 `drifted`。
-- 同一交换机同一时刻只允许一个未完成的 apply（保证失败回退时不会覆盖更新的变更）；并发提交返回 409。
+- On failure the **device is left untouched** (the backend applies the whole diff in one atomic
+  commit), and the controller **rolls the desired state back to the version before the operation**,
+  marking it `drifted`.
+- A switch allows only one unfinished apply at a time (so a rollback cannot overwrite a newer
+  change); concurrent submissions return 409.
 
-### 设备侧管理标记与"严格删除"
-控制器在设备上给自己创建的对象打**管理标记**（`marking.value`，默认
-`managed-by-switchctl`）。标记如何写进设备——description 字段、名称后缀还是别的形式——
-由各平台后端决定，配置与业务代码不需要知道。
+### Device-side managed marker and "strict delete"
 
-对账的删除规则：
-| 设备上 | 在权威模型里 | 动作 |
+The controller marks the objects it creates on the device with a **managed marker**
+(`marking.value`, default `managed-by-switchctl`). How the marker is encoded - description field,
+name suffix or something else - is up to each platform backend; configuration and business code
+never need to know.
+
+Reconciliation delete rules:
+
+| On the device | In the authoritative model | Action |
 |---|---|---|
-| 带标记 | 否 | **删除**（清理我们自己的遗留对象） |
-| 带标记 | 是 | 核对字段（含标记），缺什么补什么 |
-| 无标记 | 否 | 只报告"未托管对象"，**绝不删** |
+| marked | no | **delete** (clean up our own leftovers) |
+| marked | yes | reconcile fields (including the marker), fill in whatever is missing |
+| unmarked | no | only report as "unmanaged"; **never delete** |
 
-由此保证：**别人的配置永远不会被自动删除**。`DELETE` 接口也只允许删除管理中的对象
-（未托管对象返回 409，请人工处理）。
+This guarantees that **nobody else's configuration is ever deleted automatically**.
+`DELETE` endpoints likewise only delete managed objects (unmanaged objects return 409; handle them manually).
 
-### 对账会覆盖管理域内的手工改动
-对账 diff 是"权威模型 vs 设备实际"：管理域（VRF/VLAN/SVI/BGP）内任何非控制器所为的
-改动，会在下一次收敛（启动对账，或该设备后续任意一次 apply 的全量 diff）时被纠正回权威态。
-未管理的配置不受任何影响。
+### Reconciliation overwrites manual changes inside the managed domain
 
-## 配置
+The reconciliation diff is "authoritative model vs device reality": any change inside the managed
+domain (VRF/VLAN/SVI/port/sub-interface/BGP) that the controller did not make is corrected back to
+the authoritative state at the next convergence (startup reconciliation, or any later apply's
+full-model diff). Unmanaged configuration is never touched.
 
-见 [configs/switchctl.example.yaml](configs/switchctl.example.yaml)（含全部字段注释）。
-凭据一律通过环境变量（`*_env`，支持 `${VAR}`）或 0600 权限文件（`*_file`）引用。
+## Configuration
 
-## 部署
+See [configs/switchctl.example.yaml](configs/switchctl.example.yaml) (every field is documented).
+Credentials are always referenced through environment variables (`*_env`, `${VAR}` supported) or
+0600 files (`*_file`).
 
-单静态二进制：`make build` 后放到目标机器，用现有方式拉起（前台 / nohup / 容器 / supervisor）。
-控制器假定单实例运行（同一 `data_dir` 请勿同时启动多个进程）。
+## Deployment
 
-> 注意：本项目处于开发期。schema 迁移由二进制启动时自动执行；更早的 schema 不兼容，
-> 请删除 `data_dir` 重建。
+Single static binary: run `make build`, copy it to the target host, and start it however you prefer
+(foreground / nohup / container / supervisor). The controller assumes a single instance
+(never start two processes against the same `data_dir`).
+
+> Note: this project is under development. Schema migrations run automatically at startup, and
+> older schemas are incompatible - delete `data_dir` and recreate it.
 >
-> 设备清单以 YAML 为唯一事实来源：从 YAML 移除设备后，API 与对账立即不再管理它，
-> 但其历史操作仍保留在 DB（重新加入清单后会沿用原有权威模型）。
+> The device inventory in YAML is the single source of truth: after removing a device from the YAML,
+> the API and reconciliation stop managing it immediately, but its operation history stays in the DB
+> (re-adding it reuses the existing authoritative model).
 
-## 开发
+## Development
 
 ```bash
-make check   # gofmt + go vet + go test -race
+make check   # gofmt check + go vet + staticcheck + go test -race
 ```

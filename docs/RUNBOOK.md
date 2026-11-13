@@ -1,6 +1,6 @@
 # switchctl 运维手册（Runbook）
 
-> 架构：权威配置模型（内存 + DB）→ 期望态收敛（拉实际 → diff → 下发 → 验证）；
+> 架构：权威配置模型（内存 + DB）-> 期望态收敛（拉实际 -> diff -> 下发 -> 验证）；
 > 漂移只在启动对账时发现（没有周期性对账，也没有手动对账入口）。
 > 语义细节见 [README](../README.md) 与 [设计文档](DESIGN.md)。
 >
@@ -31,7 +31,7 @@ set -a; . /etc/switchctl/switchctl.env; set +a
 ./bin/switchctl -config /etc/switchctl/switchctl.yaml
 ```
 
-注意：控制器假定单实例运行——同一 `data_dir` 请勿同时启动多个进程；优雅退出（SIGTERM）
+注意：控制器假定单实例运行--同一 `data_dir` 请勿同时启动多个进程；优雅退出（SIGTERM）
 会停止接单并等待在途操作（`server.shutdown_grace` 为上限）。
 
 ## 2. 设备侧前置条件（**上线前必须完成**）
@@ -67,7 +67,7 @@ feature nxapi                      # 或走 NETCONF：feature netconf
 show nxapi                         # 确认 NX-API 状态（HTTP/HTTPS 端口）
 ```
 
-事务能力核实：`configure session <name>` → 改动 → `commit` / `abort`；
+事务能力核实：`configure session <name>` -> 改动 -> `commit` / `abort`；
 `checkpoint <name>` + `rollback running-config checkpoint <name>`。
 
 ## 3. 首次接入交换机
@@ -80,7 +80,7 @@ show nxapi                         # 确认 NX-API 状态（HTTP/HTTPS 端口）
 
 1. 网络可达性：锐捷 `nc -vz <IP> 830`；Nexus `curl -k https://<IP>/`（NX-API）。
 2. 启动服务，`GET /api/v1/switches` 应看到交换机（`sync_state: unknown`）。
-3. 启动后会自动为首批设备触发一次对账（建立 verified 基线）——
+3. 启动后会自动为首批设备触发一次对账（建立 verified 基线）--
    设备不可达会在操作记录/日志中报错；可达则返回 unmanaged 报告（设备上已有的
    VRF/VLAN 全部列为"未托管"，只报告不删）。
 4. 小改动试水：创建一个测试 VLAN 再删除（`PUT/DELETE /switches/<name>/vlans/3999`），
@@ -139,7 +139,7 @@ curl 'http://<host>:8080/api/v1/operations?switch=<name>&limit=20'
 - 端口名里的 `/` 必须编码为 `%2F`（如 `Ethernet1%2F1`），否则会被当成路径分隔符。
 - 端口存在子接口时不能切换二层/三层；先删子接口。恢复二层用 `PUT .../ports/<port>` + `{"mode":"l2"}`。
 - `PUT`/`DELETE` 立即返回 202：**期望态已入库**，设备由后台收敛。
-- 幂等重复提交 → 200 + `no_change`。
+- 幂等重复提交 -> 200 + `no_change`。
 - 设备跟没跟上：看 `/switches` 的 `sync_state`（`synced` / `drifted`）。
 
 ## 5. 故障处置
@@ -162,17 +162,17 @@ curl 'http://<host>:8080/api/v1/operations?switch=<name>&limit=20'
 ### 设备上有"未托管对象"报告
 对账会把设备上**不带管理标记**的 VRF/VLAN/SVI/BGP 邻居列在操作详情的
 `changes.unmanaged_*` 里（只报告，绝不删除）。处置选择：
-- 保留它 → 什么都不做（控制器永远不碰）。
-- 纳入管理 → 用 `PUT` 创建同名对象（会补写管理标记，自此归控制器管）。
-- 删除它 → 人工登录设备删除（控制器不做，防误删）。
+- 保留它 -> 什么都不做（控制器永远不碰）。
+- 纳入管理 -> 用 `PUT` 创建同名对象（会补写管理标记，自此归控制器管）。
+- 删除它 -> 人工登录设备删除（控制器不做，防误删）。
 
 ### 设备侧标记被人工改动
-- 有人把受管对象的标记（description 或平台约定的名称后缀）删了 → 对账会**补写标记**（对象仍在期望态里）。
+- 有人把受管对象的标记（description 或平台约定的名称后缀）删了 -> 对账会**补写标记**（对象仍在期望态里）。
   若要彻底放弃管理：先从 API 删除对象。
-- 有人给手工对象加了我们的标记字符串 → 对账会把它当受管对象处理（在期望态里就保留，
+- 有人给手工对象加了我们的标记字符串 -> 对账会把它当受管对象处理（在期望态里就保留，
   不在就删除）。避免在设备上使用与 `marking.*` 相同的字样。
 
-### 管理面被改坏 —— **控制台救援（break-glass）**
+### 管理面被改坏 -- **控制台救援（break-glass）**
 控制器已不含 SSH CLI 路径，NETCONF 与 SSH 都跑在管理面上：一旦下发把管理面改坏
 （mgmt ACL、AAA、`no ip ssh`、VTY 变更），远程通道会**同时失联**，此时唯一恢复手段是
 **设备的物理串口控制台**：
@@ -210,7 +210,7 @@ curl 'http://<host>:8080/api/v1/operations?switch=<name>&limit=20'
 
 - 启动时执行 `PRAGMA quick_check`，库损坏会直接拒绝启动（需修复或重建 data_dir）。
 - schema 版本高于本程序支持的最高版本时**拒绝启动**（防降级写坏数据）。
-- 迁移失败 → **直接拒绝启动**（打印错误后退出），修复数据库后重启。
+- 迁移失败 -> **直接拒绝启动**（打印错误后退出），修复数据库后重启。
 | `该平台的后端未实现` | 该平台没有注册 southbound 后端（当前全部如此，等 M6/M7） |
 | `unmanaged_*` 列表 | 设备上存在不归控制器管的对象（只报告不删） |
 | `not_managed`（409） | DELETE 的目标不在期望态里，控制器拒绝代删（防误删他人配置） |

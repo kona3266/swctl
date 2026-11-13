@@ -1,4 +1,4 @@
-# switchctl 配置样例 —— 复制为 configs/switchctl.yaml 后按需修改。
+# switchctl 配置样例 -- 复制为 configs/switchctl.yaml 后按需修改。
 # 目标平台：Cisco Nexus 9000（NX-API）/ 锐捷 RG-S6580（NETCONF）。
 # 注意：南向下发后端尚未实现；配置了设备时控制器启动会因初始化失败而退出。
 # 凭据只写“环境变量名/文件路径”，不写明文；启动时解析，缺失即报错。
@@ -21,7 +21,7 @@ execution:
 
 marking:
   value: managed-by-switchctl        # 写进设备的“归控制器管理”标记值
-                                     # 具体写在哪个字段（description / 名称后缀…）由平台后端决定
+                                     # 具体写在哪个字段（description / 名称后缀...）由平台后端决定
 
 logging:
   level: info                     # debug | info | warn | error

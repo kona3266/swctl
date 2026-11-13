@@ -1,8 +1,8 @@
-# switch-ctl — 交换机配置控制器（设计现状）
+# switch-ctl - 交换机配置控制器（设计现状）
 
 ## 定位与范围
 
-控制器统一管理交换机配置。外部系统通过 REST API 用**业务语义**（创建 VRF / 配置 BGP 邻居……）
+控制器统一管理交换机配置。外部系统通过 REST API 用**业务语义**（创建 VRF / 配置 BGP 邻居......）
 表达意图，控制器负责把意图落到设备上。
 
 | 维度 | 现状 |
@@ -10,7 +10,7 @@
 | 运行形态 | 独立常驻服务（standalone daemon）+ REST API，不依赖 Kubernetes |
 | 目标平台 | **Cisco Nexus 9000（standalone NX-OS）**、**锐捷 RG-S6580（RGOS 12.5）** |
 | 接入方式 | **模型驱动**：Nexus 走 NX-API，锐捷走 NETCONF |
-| 规模 | 1–4 台交换机 —— 单进程、单二进制、SQLite，不引入 Redis/MQ/Postgres |
+| 规模 | 1-4 台交换机 -- 单进程、单二进制、SQLite，不引入 Redis/MQ/Postgres |
 | 技术栈 | Go（环境 go1.26.4） |
 
 ## 当前实现状态
@@ -55,24 +55,24 @@
 
 ## 架构与目录结构
 
-依赖方向单向：`httpapi → service → orchestrator → driver → (南向实现)`；
+依赖方向单向：`httpapi -> service -> orchestrator -> driver -> (南向实现)`；
 `store` / `state` / `model` 是叶子。
 
 ```
-cmd/switchctl/main.go          # 装配：配置→日志/DB→Runner→HTTP→优雅退出
+cmd/switchctl/main.go          # 装配：配置->日志/DB->Runner->HTTP->优雅退出
 internal/
-├── config/                    # YAML 加载/校验/默认值；凭据解析（env/file）
-├── logx/                      # slog + 脱敏 Handler
-├── httpapi/                   # 路由、DTO、handler、中间件、错误→状态码映射
-├── service/                   # 用例编排：校验 + 计算变更 + 提交期望态 + 入队
-├── orchestrator/              # 执行引擎：设备队列、收敛流程、步骤记录、崩溃恢复
-├── state/                     # 权威态管理器：内存模型 + DB 持久化 + 同步状态
-├── model/                     # 厂商无关模型：VRF/VLAN/SVI/BGP + 差异计算
-├── device/
-│   ├── driver/                # Device 接口（南向边界），当前无实现
-│   ├── dialect/               # 平台能力与后端注册表（当前为空）
-│   └── conn/                  # 按设备清单与注册表装配后端
-└── store/                     # SQLite DAO + 迁移
++--- config/                    # YAML 加载/校验/默认值；凭据解析（env/file）
++--- logx/                      # slog + 脱敏 Handler
++--- httpapi/                   # 路由、DTO、handler、中间件、错误->状态码映射
++--- service/                   # 用例编排：校验 + 计算变更 + 提交期望态 + 入队
++--- orchestrator/              # 执行引擎：设备队列、收敛流程、步骤记录、崩溃恢复
++--- state/                     # 权威态管理器：内存模型 + DB 持久化 + 同步状态
++--- model/                     # 厂商无关模型：VRF/VLAN/SVI/BGP + 差异计算
++--- device/
+|   +--- driver/                # Device 接口（南向边界），当前无实现
+|   +--- dialect/               # 平台能力与后端注册表（当前为空）
+|   +--- conn/                  # 按设备清单与注册表装配后端
++--- store/                     # SQLite DAO + 迁移
 ```
 
 ### 南向接口
@@ -94,7 +94,7 @@ type Device interface {
 
 | 关注点 | 归属 |
 |---|---|
-| 连接与认证（NETCONF / NX-API / …） | 后端实现 |
+| 连接与认证（NETCONF / NX-API / ...） | 后端实现 |
 | 渲染（命令 / XML / JSON）与错误判定 | 后端实现 |
 | 配置归一化与摘要（`Snapshot.Digest`） | 后端实现 |
 | 标记编码（写 `description` 还是名称后缀） | 后端实现 |
@@ -108,10 +108,10 @@ type Device interface {
 任何变更都走同一条路径（apply 与 reconcile 相同）：
 
 ```
-connect → pull(拉设备配置 + 留存快照) → diff(目标模型 vs 实际)
-        → push(在一次原子提交内应用整批差异) → verify(再拉一次比对)
-        → 成功：持久化 + 标记 verified
-        → 失败：设备未变（原子性保证），期望态回退到上一版本，标记 drifted
+connect -> pull(拉设备配置 + 留存快照) -> diff(目标模型 vs 实际)
+        -> push(在一次原子提交内应用整批差异) -> verify(再拉一次比对)
+        -> 成功：持久化 + 标记 verified
+        -> 失败：设备未变（原子性保证），期望态回退到上一版本，标记 drifted
 ```
 
 原子性来自设备侧：NETCONF 的 `candidate` + `<commit>`（锐捷需
@@ -131,7 +131,7 @@ connect → pull(拉设备配置 + 留存快照) → diff(目标模型 vs 实际
 
 - `desired_version`：北向每次提交推进；
 - `verified_version`：最后一次“收敛成功 + 验证通过”追平到的版本；
-- op 完成判定 = `verified_version ≥ op.desired_version`；
+- op 完成判定 = `verified_version >= op.desired_version`；
 - 漂移不回退版本：`desired > verified` 即存在未落地变更。
 
 ### 逐 op 串行
@@ -179,7 +179,7 @@ connect → pull(拉设备配置 + 留存快照) → diff(目标模型 vs 实际
 | 子接口 | `port` + `vlan`（1~4094，dot1q）、`ip`（CIDR，必填）、`vrf` | 父口须已纳管且为三层；`vrf` 非空时须在管理中；绑定可用专用端点（与 SVI 一致） |
 
 `{port}` 中的 `/` 必须 URL 编码（`Ethernet1%2F1`）。子接口名为 `<port>.<vlan>`。
-下发顺序：端口 → 子接口增改 → 子接口删；设备上多余端口只报告，不删除。
+下发顺序：端口 -> 子接口增改 -> 子接口删；设备上多余端口只报告，不删除。
 
 ### 并发与背压
 
@@ -216,7 +216,7 @@ connect → pull(拉设备配置 + 留存快照) → diff(目标模型 vs 实际
 |---|---|---|
 | NX-OS | `configure session` + commit/abort | 一次收敛的全部变更放进一个 session，失败整体 abort |
 | NX-OS | `checkpoint` + `rollback running-config checkpoint` | 人工兜底（控制器不自动回滚） |
-| 锐捷 | NETCONF candidate + commit + cancel-commit | 期望态写 candidate → `<validate>` → `<commit>`；失败用 `cancel-commit` |
+| 锐捷 | NETCONF candidate + commit + cancel-commit | 期望态写 candidate -> `<validate>` -> `<commit>`；失败用 `cancel-commit` |
 
 ## REST API 规格
 
